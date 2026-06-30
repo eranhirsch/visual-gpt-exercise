@@ -1,3 +1,4 @@
+import dataclasses
 import os
 import pickle
 
@@ -35,7 +36,20 @@ model = GPT(
         bias=False,
     )
 )
-# ... optimizer + training loop: same shape as your char-GPT ...
+model.to(device)
+
+# training knobs (a few hundred iters is enough to see the naive batcher fail)
+max_iters = 300
+eval_interval = 50
+eval_iters = 50
+learning_rate = 1e-3
+
+optimizer = model.configure_optimizers(
+    weight_decay=1e-1,
+    learning_rate=learning_rate,
+    betas=(0.9, 0.99),
+    device_type="cuda" if device == "cuda" else "cpu",
+)
 
 
 def get_batch(split):
@@ -51,7 +65,50 @@ def get_batch(split):
         [torch.from_numpy(data[i : i + block_size].astype(np.int64)) for i in ix]
     )
     y = torch.stack(
-        [torch.from_numpy(data[i + 1 : i + 1 + block_size].astype(np.int64)) for i in ix]
+        [
+            torch.from_numpy(data[i + 1 : i + 1 + block_size].astype(np.int64))
+            for i in ix
+        ]
     )
 
     return x.to(device), y.to(device)
+
+
+@torch.no_grad()
+def estimate_loss():
+    # average loss over a few random batches, for train and val
+    model.eval()
+    out = {}
+    for split in ("train", "val"):
+        losses = torch.zeros(eval_iters)
+        for k in range(eval_iters):
+            x, y = get_batch(split)
+            _, loss = model(x, y)
+            losses[k] = loss.item()
+        out[split] = losses.mean().item()
+    model.train()
+    return out
+
+
+if __name__ == "__main__":
+    for it in range(max_iters + 1):
+        if it % eval_interval == 0:
+            losses = estimate_loss()
+            print(
+                f"iter {it:4d} | train {losses['train']:.4f} | val {losses['val']:.4f}"
+            )
+
+        x, y = get_batch("train")
+        _, loss = model(x, y)
+        optimizer.zero_grad(set_to_none=True)
+        loss.backward()
+        optimizer.step()
+
+    # save a checkpoint sample_image.py can load
+    ckpt = {
+        "model": model.state_dict(),
+        "config": dataclasses.asdict(model.config),
+        "meta": meta,
+    }
+    torch.save(ckpt, os.path.join(data_dir, "ckpt_image.pt"))
+    print(f"saved checkpoint -> {os.path.join(data_dir, 'ckpt_image.pt')}")
