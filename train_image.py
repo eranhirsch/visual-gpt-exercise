@@ -74,6 +74,26 @@ def get_batch(split):
     return x.to(device), y.to(device)
 
 
+def get_better_batch(split):
+    # The fix: for an image, position == spatial location. Position 0 is the
+    # top-left pixel, ALWAYS. So every example must be one whole image aligned
+    # to position 0 -- never a random offset into the stream.
+    data = train_data if split == "train" else val_data
+
+    # one row per image; sample whole rows (whole images)
+    images = data.reshape(-1, seq_len)  # (num_images, seq_len)
+    ix = torch.randint(images.shape[0], (batch_size,))
+    batch = torch.from_numpy(images[ix.numpy()].astype(np.int64))  # (batch, seq_len)
+
+    # within an image: predict pixel t+1 from pixels 0..t.
+    # slicing makes these views non-contiguous, and model.py does targets.view(-1)
+    # -> .contiguous() here, or the view() blows up (the bug is in the data layer).
+    x = batch[:, :-1].contiguous()  # pixels 0 .. seq_len-2
+    y = batch[:, 1:].contiguous()  # pixels 1 .. seq_len-1 (the targets)
+
+    return x.to(device), y.to(device)
+
+
 @torch.no_grad()
 def estimate_loss():
     # average loss over a few random batches, for train and val
@@ -82,7 +102,7 @@ def estimate_loss():
     for split in ("train", "val"):
         losses = torch.zeros(eval_iters)
         for k in range(eval_iters):
-            x, y = get_batch(split)
+            x, y = get_better_batch(split)
             _, loss = model(x, y)
             losses[k] = loss.item()
         out[split] = losses.mean().item()
@@ -98,7 +118,7 @@ if __name__ == "__main__":
                 f"iter {it:4d} | train {losses['train']:.4f} | val {losses['val']:.4f}"
             )
 
-        x, y = get_batch("train")
+        x, y = get_better_batch("train")
         _, loss = model(x, y)
         optimizer.zero_grad(set_to_none=True)
         loss.backward()
